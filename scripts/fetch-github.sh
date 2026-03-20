@@ -83,14 +83,15 @@ if [[ "$EVENTS_COUNT" -gt 0 ]]; then
       }
     elif .type == "PullRequestEvent" then
       ($event.repo.name | split("/") | last) as $project |
+      (($event.payload.pull_request.title // null) // ($event.payload.pull_request.head.ref // "untitled") | gsub("[-_]+"; " ")) as $pr_title |
       {
         id: ("gh-pr-" + ($event.payload.pull_request.id | tostring)),
         source: "github",
         project: $project,
-        description: ($event.payload.action + " PR: " + $event.payload.pull_request.title),
+        description: ($event.payload.action + " PR: " + $pr_title),
         estimated_hours: 0.5,
         timestamp: $event.created_at,
-        correlation_keys: ([("repo:" + $project)] + [($event.payload.pull_request.title // "") | match("[A-Z]+-[0-9]+"; "g").string] // []),
+        correlation_keys: ([("repo:" + $project)] + [($pr_title // "") | match("[A-Z]+-[0-9]+"; "g").string] // []),
         raw_metadata: { pr_number: $event.payload.pull_request.number, repo: $event.repo.name }
       }
     elif .type == "IssuesEvent" then
@@ -120,11 +121,15 @@ if [[ "$EVENTS_COUNT" -gt 0 ]]; then
     else
       empty
     end
-  ] | flatten')
+  ] | flatten |
+  # Deduplicate: if same PR appears as both opened+merged, keep merged
+  group_by(.id) | map(if length > 1 then (sort_by(.timestamp) | last) else .[0] end)
+  ')
 else
-  # --- Attempt 2: Search Commits API (works for any date) ---
-  echo "Events API returned no results for $DATE, falling back to Search Commits API" >&2
+  # --- Attempt 2: Search APIs (works for any date) ---
+  echo "Events API returned no results for $DATE, falling back to Search APIs" >&2
 
+  # 2a: Search Commits
   SEARCH_RESPONSE=$(curl -s -w "\n%{http_code}" \
     -H "$AUTH_HEADER" \
     -H "Accept: application/vnd.github.v3+json" \
@@ -133,26 +138,61 @@ else
   SEARCH_HTTP=$(echo "$SEARCH_RESPONSE" | tail -1)
   SEARCH_BODY=$(echo "$SEARCH_RESPONSE" | sed '$d')
 
-  if [[ "$SEARCH_HTTP" != "200" ]]; then
-    echo "ERROR: Github Search API returned HTTP $SEARCH_HTTP" >&2
-    exit 2
+  COMMIT_ENTRIES="[]"
+  if [[ "$SEARCH_HTTP" == "200" ]]; then
+    COMMIT_ENTRIES=$(echo "$SEARCH_BODY" | jq --arg date "$DATE" '[
+      .items[] |
+      (.repository.full_name) as $repo |
+      ($repo | split("/") | last) as $project |
+      {
+        id: ("gh-commit-" + .sha[:12]),
+        source: "github",
+        project: $project,
+        description: (.commit.message | split("\n")[0]),
+        estimated_hours: 0.5,
+        timestamp: .commit.author.date,
+        correlation_keys: ([("repo:" + $project)] + [(.commit.message // "") | match("[A-Z]+-[0-9]+"; "g").string] // []),
+        raw_metadata: { sha: .sha, repo: $repo }
+      }
+    ]')
+  else
+    echo "WARN: Github Search Commits API returned HTTP $SEARCH_HTTP" >&2
   fi
 
-  ENTRIES=$(echo "$SEARCH_BODY" | jq --arg date "$DATE" '[
-    .items[] |
-    (.repository.full_name) as $repo |
-    ($repo | split("/") | last) as $project |
-    {
-      id: ("gh-commit-" + .sha[:12]),
-      source: "github",
-      project: $project,
-      description: (.commit.message | split("\n")[0]),
-      estimated_hours: 0.5,
-      timestamp: .commit.author.date,
-      correlation_keys: ([("repo:" + $project)] + [(.commit.message // "") | match("[A-Z]+-[0-9]+"; "g").string] // []),
-      raw_metadata: { sha: .sha, repo: $repo }
-    }
-  ]')
+  # 2b: Search PRs created by user on this date (PRs only, skip issues)
+  PR_RESPONSE=$(curl -s -w "\n%{http_code}" \
+    -H "$AUTH_HEADER" \
+    -H "Accept: application/vnd.github.v3+json" \
+    "https://api.github.com/search/issues?q=author:${GITHUB_USERNAME}+created:${DATE}+is:pr&per_page=100")
+
+  PR_HTTP=$(echo "$PR_RESPONSE" | tail -1)
+  PR_BODY=$(echo "$PR_RESPONSE" | sed '$d')
+
+  PR_ENTRIES="[]"
+  if [[ "$PR_HTTP" == "200" ]]; then
+    PR_ENTRIES=$(echo "$PR_BODY" | jq --arg date "$DATE" '[
+      .items[] |
+      (.repository_url | split("/") | last) as $project |
+      (.repository_url | ltrimstr("https://api.github.com/repos/")) as $repo |
+      {
+        id: ("gh-pr-" + (.id | tostring)),
+        source: "github",
+        project: $project,
+        description: ("opened PR: " + .title),
+        estimated_hours: 0.5,
+        timestamp: .created_at,
+        correlation_keys: ([("repo:" + $project)] + [(.title // "") | match("[A-Z]+-[0-9]+"; "g").string] // []),
+        raw_metadata: { pr_number: .number, repo: $repo }
+      }
+    ]')
+  else
+    echo "WARN: Github Search Issues API returned HTTP $PR_HTTP" >&2
+  fi
+
+  # Merge commits and PRs, deduplicate by id
+  ENTRIES=$(echo "$COMMIT_ENTRIES $PR_ENTRIES" | jq -s '
+    add | group_by(.id) | map(first)
+  ')
 fi
 
 # Fetch diff stats for commits to improve estimation
