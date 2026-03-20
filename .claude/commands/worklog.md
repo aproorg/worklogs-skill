@@ -279,13 +279,20 @@ After the user has reviewed and approved the worklog, execute Phase 1 and Phase 
    Would you like to create Jira tickets for these? [yes / skip]
    If skipped, these entries will be excluded from Tempo logging.
    ```
-4. If confirmed, for each entry, first resolve the Tempo account:
+4. If confirmed, for each entry, first resolve the Tempo account. If the entry has a repo name (from GitHub source), pass it with `--repo` for repo-specific account resolution:
    ```bash
+   # For entries with a repo name (GitHub-sourced):
+   bash scripts/resolve-tempo-account.sh --customer "{customer_name}" --repo "{repo_name}"
+   # For entries without a repo name:
    bash scripts/resolve-tempo-account.sh --customer "{customer_name}"
    ```
+   The script checks repo-based mappings first (e.g., `vitinn-infra` → account 154), then falls back to customer-level mappings. Repo mappings are stored in `worklogs/.account-mappings.json` with `repo:` prefixed keys.
    - If the result has `"matched": true`, use the returned `account_id`.
    - If `"matched": false`, present the user with the list of candidates from the result and ask them to pick the correct Tempo account. Once they choose, save the mapping:
      ```bash
+     # Save repo-level mapping (preferred for GitHub entries):
+     bash scripts/resolve-tempo-account.sh --save --repo "{repo_name}" --account-id {chosen_id}
+     # Or save customer-level mapping (fallback for non-GitHub entries):
      bash scripts/resolve-tempo-account.sh --save --customer "{customer_name}" --account-id {chosen_id}
      ```
    Then create the ticket with the account:

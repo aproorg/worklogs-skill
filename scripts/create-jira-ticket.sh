@@ -80,7 +80,7 @@ PAYLOAD=$(jq -n \
           customfield_12513: { value: $customer }
         } else {} end)
       + (if $accountId != "" then {
-          customfield_11530: { id: ($accountId | tonumber) }
+          customfield_11530: ($accountId | tonumber)
         } else {} end)
     )
   }')
