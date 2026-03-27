@@ -170,16 +170,16 @@ After all entries have been matched, **merge entries that share the same routed 
 
 Specifically:
 1. Group all entries where `jira_key` was assigned by a routing rule (not from correlation_keys) and `source` is the same (e.g., all `slack` entries routed to `APRO-7`).
-2. For each such group with more than one entry, collapse them into a single MergedEntry:
-   - `description`: "Internal chats: {name1}, {name2}, ..." (list the DM participant names or channel names from the original entries)
+2. For each such group, **always** collapse them into a single MergedEntry (even if only one entry exists):
+   - `description`: "Internal comms" (a single generic label — do not list individual names or channels)
    - `sources`: deduplicated union of all source types
-   - `estimated_hours`: **sum** of all individual estimates (these are distinct conversations, not double-counts)
+   - `estimated_hours`: sum of all individual estimates, **capped at 1.0h maximum**. Internal Slack communication is overhead, not primary billable work — never log more than 1h regardless of volume.
    - `jira_key`: the shared routed key (e.g., `APRO-7`)
    - `customer`: the shared customer
 3. This consolidation applies to any source type routed by rules (Slack DMs, internal calendar events, etc.), but **calendar entries are still never merged with each other** per the existing rule in Step 6.
 
-**Example**: Three internal Slack DMs (with Halldór, Páll, and Guðmundur) each routed to APRO-7 become:
-| Internal chats: Halldór, Páll, Guðmundur | slack | 1.25 | APRO-7 |
+**Example**: Three internal Slack DMs (with Halldór, Páll, and Guðmundur) each routed to APRO-7 become a single entry:
+| Internal comms | slack | 1.00 | APRO-7 |
 
 ### Managing routing rules:
 Routing rules persist in the customer cache and survive rebuilds. To manage them:
@@ -401,7 +401,7 @@ After the user has reviewed and approved the worklog, execute Phase 1 and Phase 
 
 ## Validation Rules
 
-- `estimated_hours` must be >= 0.5 and <= 14 per entry. Clamp outliers (round up entries below 0.5 to 0.5).
+- `estimated_hours` must be >= 0.5 and <= 14 per entry. Clamp outliers (round up entries below 0.5 to 0.5). GitHub entries have a minimum of 1.0h (enforced in fetch-github.sh).
 - `source` must be one of: slack, gmail, calendar, github, notion, jira
 - `timestamp` must fall within the requested date
 - Correlation key matching is case-insensitive

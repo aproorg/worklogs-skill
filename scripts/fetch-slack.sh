@@ -116,7 +116,8 @@ if [[ -n "$MPIM_CHANNELS" ]]; then
 fi
 
 # Step 2: Generate worklog entries, substituting user IDs with names
-echo "$BODY" | jq --arg date "$DATE" --argjson user_map "$USER_MAP" '
+# Then cap total Slack hours at 1.0h for the day (proportionally scale down if needed)
+ENTRIES=$(echo "$BODY" | jq --arg date "$DATE" --argjson user_map "$USER_MAP" '
   [.messages.matches // [] | .[]] |
   group_by(.channel.name) |
   map(
@@ -127,16 +128,14 @@ echo "$BODY" | jq --arg date "$DATE" --argjson user_map "$USER_MAP" '
     (if $resolved_name then $resolved_name else $channel_raw end) as $channel_display |
     # Collect all timestamps in this channel
     ([.[] | .ts | split(".")[0] | tonumber] | sort) as $times |
-    # Time span in hours
+    # Time span in hours (used for display only)
     (if ($times | length) > 1 then
       (($times | last) - ($times | first)) / 3600
     else
       0
     end) as $span |
-    # 50% of span, minimum 0.25h
-    (if $span * 0.5 > 0.25 then $span * 0.5 else 0.25 end) as $est_hours |
-    # Cap at 12h
-    (if $est_hours > 12 then 12 elif $est_hours < 0.25 then 0.25 else ($est_hours * 100 | round / 100) end) as $capped_hours |
+    # Estimate based on message count: 5min per message, min 0.25h
+    ([(. | length) * (5/60), 0.25] | max | . * 4 | round / 4) as $raw_hours |
     # Collect all ticket IDs from messages in this channel
     ([.[] | (.text // "") | [match("[A-Z]+-[0-9]+"; "g").string] | .[]] | unique) as $tickets |
     # Is this a DM?
@@ -155,7 +154,7 @@ echo "$BODY" | jq --arg date "$DATE" --argjson user_map "$USER_MAP" '
           if ($span > 0) then " (over \($span * 60 | round)min)" else "" end
         end
       ),
-      estimated_hours: $capped_hours,
+      estimated_hours: $raw_hours,
       timestamp: (.[0].ts | split(".")[0] | tonumber | todate),
       correlation_keys: ([("channel:" + $channel_raw)] + $tickets),
       raw_metadata: {
@@ -167,4 +166,16 @@ echo "$BODY" | jq --arg date "$DATE" --argjson user_map "$USER_MAP" '
       }
     }
   )
+')
+
+# Cap total Slack hours at 1.0h — scale down proportionally
+MAX_SLACK_HOURS=1.0
+echo "$ENTRIES" | jq --argjson cap "$MAX_SLACK_HOURS" '
+  (map(.estimated_hours) | add // 0) as $total |
+  if $total > $cap then
+    ($cap / $total) as $scale |
+    map(.estimated_hours = ((.estimated_hours * $scale * 100 | round) / 100))
+  else
+    .
+  end
 '
